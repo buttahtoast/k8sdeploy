@@ -1,0 +1,12 @@
+---
+## Check if ansible groups are defined
+- fail:
+    msg: "No ansible groups defined: {{ vars.group_names }}"
+  when: vars.group_names |length == 0
+
+## Execute Deployment for each Group
+- include: "tasks.yml"
+  with_items:
+    - "{{ vars.group_names }}"
+  loop_control:
+    loop_var: group

@@ -1,0 +1,9 @@
+---
+## -- Execute Deployment for each Endpoint
+- include: "deploy.yml"
+  vars:
+    deployment_tpl: "{{ deploy }}"
+  with_items:
+    - "{{ deploy.endpoints }}"
+  loop_control:
+    loop_var: endpoint

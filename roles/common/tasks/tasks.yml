@@ -1,0 +1,129 @@
+- block:
+
+  ## Deployment Feedback
+  - debug:
+      msg: "Running Deployment for group {{ group }}"
+
+  ## Add subdirectory to basepath, if defined
+  - name: "Define Basepath"
+    set_fact:
+      base_dir: "{{ playbook_dir }}/{{ sub_dir }}"
+    when: sub_dir is defined
+
+  ## Declare Artifacts path
+  - name: "Define Artifacts Path"
+    set_fact:
+      artifacts_path: "{{ base_dir }}/{{ artifacts_dir }}"
+
+  ## Create Artifacts path
+  - name: "Create Artifacts Directory"
+    file:
+      path: "{{ artifacts_path }}"
+      state: directory
+
+  - name: "Precheck | Register Private Key"
+    no_log: True
+    set_fact:
+      ejson_privkey: "{{ lookup('env', 'EJSON_PRIVKEY') }}"
+    when: not ejson_privkey
+
+
+  - name: "Precheck | Check EJSON Private Key"
+    fail:
+      msg: "Missing Private Key! Define Environment Variable 'EJSON_PRIVKEY' or Ansible Variable 'ejson_privkey'"
+    when: not ejson_privkey
+
+  ## Merge current group values with all
+  - name: "Values Merge | Merge Ansible Structure"
+    command:  bash ejson-merger/ejson-merger.sh -v -s "{{ base_dir }}/group_vars/all, {{ base_dir }}/group_vars/{{ group }}"
+    register: initial_values
+
+  ## Register output as ansible dictionary
+  - name: "Values Merge | Convert Ansible Values to JSON"
+    set_fact:
+      initial_values_json: "{{ initial_values.stdout | from_json }}"
+
+  - name: "Values Merge | Temporary Copy"
+    copy:
+      content: "{{ initial_values_json | to_nice_json }}"
+      dest: "{{ artifacts_path }}/initial-vars.json"
+
+  - name: "Values Merge | Download GIT Remotes"
+    git:
+      repo: "{{ item.git }}"
+      version: "{{ item.version | default('master') }}"
+      dest: "{{ artifacts_path }}/external/git/{{ item.name }}"
+    with_items:
+      - "{{ vars.deploy.remote }}"
+    when: "initial_values_json.remotes and item.git is defined"
+
+  - name: "Values Merge | Directory HTTP Remotes"
+    file:
+      path: "{{ artifacts_path }}/external/url/"
+      state: directory
+  - name: "Values Merge | Download HTTP Remotes"
+    get_url:
+      url: "{{ item.url }}"
+      dest: "{{ artifacts_path }}/external/url/"
+    with_items:
+      - "{{ initial_values_json.remotes }}"
+    when: "initial_values_json.remotes and item.url and item.git is undefined"
+## -- Merge External Values
+  - name: "Values Merge | Merge Values"
+    command:  bash ejson-merger/ejson-merger.sh  -i "{{ artifacts_path }}/initial-vars.json" -s "{{ artifacts_path }}/external/" -e "yaml, yml, json" -v
+    no_log: True
+    register: external_values
+  - name: "Values Merge | Temporary local json file"
+    copy:
+      content: "{{ external_values.stdout | from_json | to_nice_json }}"
+      dest: "{{ artifacts_path }}/external-vars.json"
+## -- Merge Secrets
+  - name: "Preflight | Retrieve Secrets"
+    command:  bash ejson-merger/ejson-merger.sh -i "{{ artifacts_path }}/external-vars.json" -s "{{ artifacts_path }}/external, {{ base_dir }}/group_vars/all, {{ base_dir }}/group_vars/{{ group }}" -p "{{ ejson_privkey }}" -e "ejson"
+    #no_log: True
+    register: secret_merged_values
+  - name: "Preflight | Convert merged Configuration"
+    no_log: True
+    set_fact:
+      secret_merged_values_json: "{{ secret_merged_values.stdout | from_json }}"
+## -- Preflight Syntax
+## -- Includes
+## --- Deployment Structure Validation
+  - name: "Syntax | Validate Basic Structure"
+    fail:
+      msg: "Missing '.deployments' key in the Deployment structure"
+    when: not secret_merged_values_json.deployments
+  - name: "Syntax | Validate Cluster Structure"
+    fail:
+      msg: "Missing '.clusters' key in the Deployment structure"
+    when: not secret_merged_values_json.clusters
+  - debug:
+      msg: "{{ secret_merged_values_json.clusters }}"
+
+  ## -- Execute Kubeconfig Role
+  - name: "Execute Kubeconfig Role"
+    no_log: True
+    include_role:
+      name: "kubeconfig"
+    with_items:
+      - "{{ secret_merged_values_json.clusters }}"
+    loop_control:
+      loop_var: cluster_config
+
+  ## -- Execute Deployment Role
+  - name: "Execute Deploy Role"
+    no_log: True
+    include_role:
+      name: "deploy"
+    with_items:
+      - "{{ secret_merged_values_json.deployments }}"
+    loop_control:
+      loop_var: deploy
+
+
+  ## -- Always Remove Artifacts
+  always:
+    - name: "Postflight | Remove Artifacts"
+      file:
+        state: absent
+        path: "{{ artifacts_path }}"

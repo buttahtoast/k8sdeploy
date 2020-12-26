@@ -1,0 +1,3 @@
+---
+artifacts_dir: "artifacts"
+base_dir: "{{ playbook_dir }}"

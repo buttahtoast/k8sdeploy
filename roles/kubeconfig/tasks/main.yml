@@ -1,0 +1,195 @@
+---
+#
+## -- Syntax Checks
+#
+
+
+
+
+#
+## -- Register Predefined paths
+#
+
+## Directory for all Kubeconfigs
+- name: "Register Kubeconfig Directory"
+  set_fact:
+    kubeconfig_path: "{{ artifacts_path }}/cluster_config"
+- name: "Kubeconfig | Create Kubeconfig Directory"
+  file:
+    path: "{{ kubeconfig_path }}"
+    state: directory
+
+## Peredefined Pre and Post paths
+- name: "Register Kubeconfig Destinations"
+  set_fact:
+    kubeconfig_enc_destination: "{{ kubeconfig_path }}/{{ cluster_config.name }}.enc"
+    kubeconfig_destination: "{{ kubeconfig_path }}/{{ cluster_config.name }}"
+
+#
+## Set Variables
+#
+
+## Try to set decryption mode (enabled/disabled)
+- block:
+    - set_fact:
+        decryption_enabled: false
+      no_log: true
+      when: "cluster_config.decrypt.disabled"
+  rescue:
+    - set_fact:
+        decryption_enabled: true
+
+- debug:
+    msg: "{{ decryption_enabled }}"
+
+
+## Default Kubeconfig Type
+- name: "Custom Kubeconfig Type"
+  set_fact:
+    kubeconfig_type: "{{ cluster_config.type }}"
+  when: "cluster_config.type is defined"
+
+- name: "Default Kubeconfig Type"
+  set_fact:
+    kubeconfig_type: "file"
+  when: "cluster_config.type is undefined"
+
+## Extract Filepath for local configuration
+- name: "Custom Kubeconfig File"
+  set_fact:
+    kubeconfig_local_file: "{{ cluster_config.path }}"
+  when: "cluster_config.path"
+
+## Default (without encryption)
+- name: "Default Kubeconfig File (No Encryption)"
+  set_fact:
+    kubeconfig_local_file: "{{ base_dir }}/{{ cluster_config.name }}"
+  when: not kubeconfig_local_file and not decryption_enabled
+
+## Default (with encryption)
+- name: "Default Kubeconfig File (Encryption)"
+  set_fact:
+    kubeconfig_local_file: "{{ base_dir }}/{{ cluster_config.name }}.enc"
+  when: not kubeconfig_local_file and decryption_enabled
+
+#
+## -- Type Local Kubeconfig
+#
+
+## Prepare Local Kubeconfig
+- name: "Register Local file path"
+  stat: "path={{ kubeconfig_local_file }}"
+  register: local_kubeconfig
+  when: kubeconfig_type  == "local"
+
+## Prepare Local Kubeconfig
+- name: "Local file validation"
+  fail:
+    msg: "Missing Local File {{ kubeconfig_local_file }}"
+  when: kubeconfig_type  == "local" and not local_kubeconfig.stat.exists
+
+## Prepare Local Kubeconfig
+- name: "Register Local Encrypted Destination"
+  set_fact:
+    kubeconfig_enc_destination: "{{ kubeconfig_local_file }}"
+  when: kubeconfig_type  == "local" and decryption_enabled
+
+## Prepare Local Kubeconfig
+- name: "Register Local Destination"
+  set_fact:
+    kubeconfig_destination: "{{ kubeconfig_local_file }}"
+  when: kubeconfig_type  == "local" and not decryption_enabled
+
+- debug:
+    msg: "{{ kubeconfig_enc_destination }} - {{ kubeconfig_destination }}"
+
+# -- Download Kubeconfig (Type: Url)
+
+- name: "Download Remote Kubeconfig"
+  get_url:
+    url: "{{ cluster_config.url }}"
+    dest: "{{ artifacts_path }}/{{ kubeconfig_enc_destination }}"
+  when: kubeconfig_type  == "url" and cluster_config.auth is undefined
+
+- name: "Download Remote Kubeconfig (Authentication)"
+  get_url:
+    url: "{{ cluster_config.url }}"
+    dest: "{{ artifacts_path }}/{{ kubeconfig_enc_destination }}"
+    url_username: "{{ cluster_config.auth.user }}"
+    url_password: "{{ cluster_config.auth.password }}"
+  when: kubeconfig_type  == "url" and cluster_config.auth is defined
+
+#
+## -- Kubeconfig Extraction
+#
+
+## Feedback
+- debug:
+    msg: "Current Kubeconfig running \nName: {{ cluster_config.name }}\nType: {{ kubeconfig_type }}\nDecryption: {{ decryption_enabled }}"
+
+## Overwrite used decryption key for this kubeconfig
+- name: "Cluster Specific Decryption"
+  set_fact:
+    ejson_privkey: "{{ kubernetes_cluster.decrypt.key }}"
+  no_log: True
+  when: decryption_enabled and cluster_config.decrypt.key is defined
+
+## Decrypt Config via Openssl
+- name: "Decrypt Kubeconfig with openssl"
+  register: decryption
+  shell: openssl enc -d -aes256 -in {{ kubeconfig_enc_destination }} -out {{ kubeconfig_destination }} -k {{ ejson_privkey }}
+  no_log: true
+  ignore_errors: true
+  failed_when: decryption.rc != 0
+  when: kubeconfig_type == "local" and decryption_enabled
+
+#
+## Post Checks
+#
+
+## Kubeconfig Existence
+
+- name: "Register Kubeconfig destination"
+  stat: path={{ kubeconfig_destination }}
+  register: kubeconfig_file
+
+- name: "Validate existence of Kubeconfig"
+  fail:
+    msg: "Kubeconfig {{ kubeconfig_destination }} was not found, something went wrong!"
+  when: not kubeconfig_file.stat.exists
+
+#
+## Test Kubectl Context
+#
+
+- debug:
+    msg: "{{ cluster_config.name }} - {{ kubeconfig_destination }} - {{ kubeconfig_enc_destination }}"
+
+
+## Evaluate current Context
+- name: "Set Cluster-Name as Context | Dry-Run"
+  set_fact:
+    kubernetes_context: "{{ cluster_config.name }}"
+
+- name: "Set Specific Cluster-Context | Dry-Run"
+  set_fact:
+    kubernetes_context: "{{ cluster_config.context }}"
+  when: cluster_config.context is defined
+
+- name: "Test Kubectl Context"
+  command:  "kubectl config --kubeconfig={{ kubeconfig_destination }} use-context {{ kubernetes_context }}"
+  register: kubectl_context_out
+  no_log: true
+  ignore_errors: true
+
+- name: "Test Kubectl Context | Error"
+  fail:
+    msg: "{{ kubectl_context_out.stderr }}"
+  when: kubectl_context_out.stderr
+
+## Creates a new list, which contains all kubeconfigs with their associated
+- name: Link Kubeconfig Array"
+  set_fact:
+    kubeconfigs: "{{ kubeconfigs + kubeconfig_cluster_path }}"
+  vars:
+    kubeconfig_cluster_path: "[{ 'name': '{{ cluster_config.name }}', 'config': '{{ kubeconfig_destination }}', 'context': '{{ kubernetes_context }}' }]"

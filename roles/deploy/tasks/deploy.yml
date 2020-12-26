@@ -1,0 +1,191 @@
+---
+## -- Syntax Checks
+
+
+
+#
+## -- Global Scoped Namespace
+#
+
+# The lowest priority for the namespaces goes to the namespaces defined
+# by the endpoints. These seerve the purpose, to have a default namespace
+# for an endpoint.
+- name: "Register Endpoint Namespace"
+  set_fact:
+    deployment_scope_namespace: "{{ endpoint.namespace }}"
+  when: endpoint.namespace is defined
+
+# The namespaces defined in the reckoner structure of the deployment overwrite
+# the endpoint defined by the endpoint it's running on.
+- name: "Register Deployment Namespace"
+  set_fact:
+    deployment_scope_namespace: "{{ deployment_tpl.reckoner.namespace }}"
+  when: deployment_tpl.reckoner is defined and deployment_tpl.reckoner.namespace is defined
+
+# Fail when no global namespace was given
+- fail:
+    msg: "Missing Global Namespace"
+  when: not deployment_scope_namespace
+
+
+
+#
+## -- Get Cluster per Endpoint
+#
+
+- name: "Get Cluster Endpoint Mapping"
+  set_fact:
+    kubernetes_cluster: "{{ kubeconfigs |json_query(query) | first }}"
+  vars:
+    query: "[?name=='{{ endpoint.cluster }}']"
+
+- name: "Set Kubeconfig for Deployment"
+  set_fact:
+    kubectl_config: "{{ kubernetes_cluster.config }}"
+
+- name: "Set Context for Deployment"
+  set_fact:
+    kubectl_context: "{{ kubernetes_cluster.context }}"
+
+- name: "Deployment | Endpoint Namespace"
+  set_fact:
+    deployment: "{{ deployment_tpl | combine(end_dict, recursive=True) }}"
+  vars:
+    end_dict: "{ 'reckoner': { 'namespace': '{{ deployment_scope_namespace }}', 'context': '{{ kubectl_context }}' } }"
+  when: deployment_tpl.reckoner is defined
+
+
+
+
+
+
+
+
+
+## Switch Kubectl Contex
+- name: "Switch Kubectl Context"
+  command: "kubectl config use-context {{ kubectl_context }}"
+  environment:
+    KUBECONFIG: "{{ kubectl_config }}"
+
+## -- Overwrite Namespace
+
+#
+## -- Final Preparations
+#
+
+
+
+#
+## Export Deployment Variables
+#
+
+- name: "Deployment | Predefine Deployment Values"
+  set_fact:
+    deployment_values_path: "{{ artifacts_path }}/deployment.json"
+  when: deployment.reckoner
+
+- name: "Deployment | Create Deployment Values"
+  no_log: True
+  copy:
+    content: "{{ deployment.reckoner | to_nice_json }}"
+    dest: "{{ deployment_values_path }}"
+  when: deployment.reckoner
+
+#
+## Kubectl Pre Deployment (Dry-Run)
+#
+
+# Iterates through all defined Pre-Deployment resources and applies
+# them indivdually. This allows to define for each resource a different
+# namespace. If not set the scoped namespace for this deployment will
+# be used. Error handling is done in the following task.
+- name: "Kubernetes Pre Deployment Dry-Run"
+  shell: "echo '{{ item.spec | to_json }}' | kubectl apply --dry-run='server' --namespace {{ item.namespace | default(deployment_scope_namespace) }} -f - {{ kubectl_args }}"
+  with_items:
+    - "{{ deployment.kubernetesResources.pre }}"
+  environment:
+    KUBECONFIG: "{{ kubectl_config }}"
+  when: "deployment.kubernetesResources and deployment.kubernetesResources.pre"
+
+
+#
+## -- Reckoner Plot (Dry-Run)
+#
+
+# The Reckoner Dry-Run will only execute, when there's reckoner values
+# for the current looped deployment. If not it will be skipped.
+- name: "Reckoner Plot Deployment Dry-Run"
+  command: reckoner plot --create-namespace --dry-run {{ reckoner_args }} {{ deployment_values_path }}
+  #no_log: True
+  ignore_errors: True
+  register: reckoner_deploy_dry
+  environment:
+    KUBECONFIG: "{{ kubectl_config }}"
+  when: deployment.reckoner
+
+# Error Handling for Reckoner Dry-Run
+- name: "Reckoner Plot Deployment Dry-Run | Error"
+  fail:
+    msg: "{{ reckoner_deploy_dry.stderr }}"
+  when: deployment.reckoner and reckoner_deploy_dry is failed
+
+#
+##  Kubectl Post Deployment (Dry-Run)
+#
+
+# Iterates through all defined Pre-Deployment resources and applies
+# them indivdually. This allows to define for each resource a different
+# namespace. If not set the scoped namespace for this deployment will
+# be used. Error handling is done in the following task.
+- name: "Kubernetes Post Deployment Dry-Run"
+  shell: "echo '{{ item.spec | to_json }}' | kubectl apply --dry-run='server' --namespace {{ item.namespace | default(deployment_scope_namespace) }} -f - {{ kubectl_args }}"
+  with_items:
+    - "{{ deployment.kubernetesResources.post }}"
+  environment:
+    KUBECONFIG: "{{ kubectl_config }}"
+  when: "deployment.kubernetesResources is defined and deployment.kubernetesResources.post is defined"
+
+#
+## Kubectl Pre Deployment
+#
+
+# Same as above, but not as Dry-Run
+- name: "Kubernetes Pre Deployment"
+  shell: "echo '{{ item.spec | to_json }}' | kubectl apply --dry-run='server' --namespace {{ item.namespace | default(deployment_scope_namespace) }} -f - {{ kubectl_args }}"
+  with_items:
+    - "{{ deployment.kubernetesResources.pre }}"
+  environment:
+    KUBECONFIG: "{{ kubectl_config }}"
+  when: not dry_run_only and deployment.kubernetesResources is defined and deployment.kubernetesResources.pre is defined
+
+#
+## -- Reckoner Plot
+#
+
+- name: "Reckoner Plot Deployment"
+  command: reckoner plot --create-namespace {{ reckoner_args }} {{ artifacts_path }}/deployment.json
+  #no_log: True
+  ignore_errors: True
+  register: reckoner_deploy
+  environment:
+    KUBECONFIG: "{{ kubectl_config }}"
+  when: not dry_run_only and deployment.reckoner
+
+# Error Handling for Reckoner
+- name: "Reckoner Plot Deployment | Error"
+  fail:
+    msg: "{{ reckoner_deploy.stderr: }}"
+  when: not dry_run_only and  deployment.reckoner and reckoner_deploy is failed
+
+#
+##  Kubectl Post Deployment
+#
+
+- name: "Kubernetes Post Deployment"
+  shell: "echo '{{ item.spec | to_json }}' | kubectl apply --dry-run='server' --namespace {{ item.namespace | default(deployment_scope_namespace) }} -f - {{ kubectl_args }}"
+  with_items:
+    - "{{ deployment.kubernetesResources.post }}"
+  environment:
+    KUBECONFIG: "{{ kubectl_config }}"
+  when: not dry_run_only and deployment.kubernetesResources is defined and deployment.kubernetesResources.post is defined

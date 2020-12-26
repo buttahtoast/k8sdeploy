@@ -1,0 +1,137 @@
+# - Make sure the entire Structure is below deploy
+---
+
+## -- Remote Files
+# Allows you to add yaml/yml/json file from an external source, which will be merged with the values
+# in this repository, with the corresponding stage. This makes sense, when you have values, which are
+# identical all over your k8s-Deployments (eg. clusters or repositories)
+remotes:
+  # -- Example: Define a file which can be downloaded through the get_url modul (public available)
+  - name: "repositories"
+    url: "https://minio.kubernetli.ch/kubernetes/values/repositories.yml"
+  #- name: "clusters"
+  #  url: "https://minio.kubernetli.ch/kubernetes/clusters.yaml"
+
+## -- Cluster Inventory
+clusters:
+## -- Local File
+# Note: The name of the object has to match the name
+# in the reference kubectl Konfiguration
+  - name: "dev-cluster"
+    type: "local"
+    context: "kubernetes-admin@kubernetli"
+    path: "kubeconfigs/kubeconfig"
+    decrypt:
+      disabled: true
+
+
+  - name: "kubernetes-admin@kubernetli"
+    type: "local"
+    path: "kubeconfigs/kubeconfig.enc"
+
+
+  ## -- Remote Kubeconfig Reference
+  # Note: The name of the object has to match the name
+  # in the reference kubectl Konfiguration
+  #- name: "kubernetes-admin@kubernetli"
+  #  kubeconfig:
+  #    type: "url"
+  #    decrypt: "test"
+  #    options:
+  #      url: "https://minio.kubernetli.ch/kubernetes/test-kubernetli/master/kubeconfig.tar.7z"
+  #      ## --- Authentication for get_url (Optional)
+  #      auth:
+  #        user: "test"
+  #        password: "test"
+
+
+
+#
+## -- Reckoner Deployment Structure
+# Doc:
+deployments:
+
+  - name: "my-deployment"
+
+    ## -- Cluster Endpoints
+    endpoints:
+      - cluster: (( grab $.clusters.0.name ))
+        namespace: "default"
+      - cluster: (( grab $.clusters.1.name ))
+        namespace: "default"
+
+
+    ## -- Additional Kubernetes Ressources
+    # Doc:
+    kubernetesResources:
+      pre:
+
+        - name: "cloudflare-ingress"
+          spec:
+            apiVersion: networking.k8s.io/v1beta1
+            kind: Ingress
+            metadata:
+              name: test-ingress
+              annotations:
+                nginx.ingress.kubernetes.io/rewrite-target: /
+            spec:
+              rules:
+              - http:
+                  paths:
+                  - path: "/"
+                    backend:
+                      serviceName: test
+                      servicePort: 80
+
+
+    ## -- Reckoner Definition
+    reckoner:
+      namespace_management:
+        default:
+          metadata:
+            annotations:
+              ManagedBy: com.fairwinds.reckoner
+            labels:
+              labelName: labelValue
+          settings:
+            overwrite: True
+
+      hooks:
+        pre_install:
+          - ls ./
+
+      ## -- Available Repositories
+      ## Through a Spruce Operator the Repository Values are taken from a Remote File
+      repositories: (( grab $.REPOSITORIES ))
+
+      ## -- Default Namespace
+      namespace: "default"
+
+      ## -- Default Charts
+      charts: # list of charts
+        # release_name:
+        #   chart: Optional, name of chart. defaults to release_name if not present.
+        #   version: version to install, defaults to latest. If a git repository is used, this is a branch/tag/ref.
+        #   repository: repository to download chart from, overrides above value
+        #     name: Optional, name of repository. If 'git' is used, must match the
+        #     url: Optional if repository is listed above. Url of repository to add if not already included in above repositories section
+        #     git: Git url where chart exists. Supercedes url argument
+        #     path: Path where  chart is in git repository
+        #   namespace: namespace to install chart in, overrides above value
+        #   values: # key-value pairs to pass in using the helm --set argument. Inspect individual charts to determine which keys are available and should be set
+        #     key: value
+        #   hooks: # Hooks maybe be strings or lists and can include redirects or pipes. Assumes Bash.
+        #     pre_install: echo test000 | grep test > testfile
+        #     post_install:
+        #     - echo test again >> testfile
+        #     - echo stuff >> testfile; cat testfile
+        rook-operator:
+          version: "1.0.0"
+          repository: "k8n-stable"
+          namespace: "kube-system"
+          values: (( grab $.values ))
+
+
+## -- Custom Values for my Deployment
+values:
+  some: "toplevel-configuration"
